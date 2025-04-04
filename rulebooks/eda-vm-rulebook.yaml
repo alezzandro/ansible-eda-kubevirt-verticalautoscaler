@@ -1,0 +1,26 @@
+---
+- name: Process Alertmanager events to scale KubeVirt VM sockets
+  hosts: all
+
+  sources:
+    - ansible.eda.alertmanager:
+        host: 0.0.0.0
+        port: 5001
+
+  rules:
+    # - name: Print information on Alert
+    #   condition: event.payload is defined
+    #   action:
+    #     debug:
+    #       var: event
+
+    - name: Trigger AAP Job Template Launch on Alert
+      condition: event.payload is defined and event.payload.status == "firing"
+      actions:
+        - run_job_template:
+            name: "KubeVirt Increase Socket for a running Virtual Machine"
+            organization: Default
+            job_args:
+              extra_vars:
+                vm_name: "{{ event.payload.alerts[0].labels.name }}"
+                vm_namespace: "{{ event.payload.alerts[0].labels.namespace }}"

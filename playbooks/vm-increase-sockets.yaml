@@ -1,0 +1,82 @@
+---
+- name: Increment KubeVirt VM CPU Sockets
+  hosts: localhost         # Run on the machine where Ansible is executed
+  connection: local      # Interact with the k8s API locally, not via SSH
+  gather_facts: false    # No need to gather facts about the localhost
+
+  # Define the target VM details here
+  vars:
+    vm_name: "my-kubevirt-vm" # <--- We need to override THIS to our VM name
+    vm_namespace: "default"   # <--- We need to override THIS to our VM namespace
+
+  tasks:
+    - name: 1. Get current KubeVirt VM object
+      kubernetes.core.k8s_info:
+        api_version: kubevirt.io/v1
+        kind: VirtualMachine
+        name: "{{ vm_name }}"
+        namespace: "{{ vm_namespace }}"
+      register: vm_info
+      # Handle potential connection errors or if the VM doesn't exist
+      failed_when: "vm_info.resources | length == 0"
+      vars:
+        # Custom error message if VM not found
+        ansible_failed_result:
+          msg: "Failed to find KubeVirt VirtualMachine '{{ vm_name }}' in namespace '{{ vm_namespace }}'."
+
+    # Optional: Display the fetched VM spec (useful for debugging)
+    # - name: Show VM Spec (Debug)
+    #   ansible.builtin.debug:
+    #     var: vm_info.resources[0].spec
+
+    - name: 2. Extract current socket count and calculate new value
+      ansible.builtin.set_fact:
+        # Extract the current value. Use default(1) if 'sockets' is not defined in the spec.
+        # Ensure it's treated as an integer.
+        current_sockets: "{{ (vm_info.resources[0].spec.domain.cpu.sockets | default(1)) | int }}"
+        # Calculate the new value
+        new_sockets: "{{ ((vm_info.resources[0].spec.domain.cpu.sockets | default(1)) | int) + 1 }}"
+
+    - name: Display socket update plan
+      ansible.builtin.debug:
+        msg: "VM '{{ vm_name }}' in ns '{{ vm_namespace }}': Planning to update sockets from {{ current_sockets }} to {{ new_sockets }}"
+
+    # # Task 3: Use k8s module with dictionary patch
+    # - name: 3. Patch VM with the incremented socket count
+    #   kubernetes.core.k8s:
+    #     state: patched  # patch the existing object
+    #     api_version: kubevirt.io/v1
+    #     kind: VirtualMachine
+    #     name: "{{ vm_name }}"
+    #     namespace: "{{ vm_namespace }}"
+    #     # Define the patch data as a dictionary matching the object structure
+    #     # Ensure the path includes 'template' based on your previous JSON patch path
+    #     definition:
+    #       spec:
+    #         template:
+    #           spec:
+    #             domain:
+    #               cpu:
+    #                 sockets: "{{ new_sockets }}" # Pass the integer variable directly
+    #   register: patch_result
+
+    # Task 3: Patch using kubectl command (JSON Patch type)
+    # This replaces the previous Task 3 which used the k8s module.
+    - name: 3. Patch VM using kubectl patch command
+      ansible.builtin.command:
+        cmd: >
+          kubectl patch virtualmachine {{ vm_name | quote }} -n {{ vm_namespace | quote }}
+          --server={{ lookup('env', 'K8S_AUTH_HOST') | quote }}
+          --token={{ lookup('env', 'K8S_AUTH_API_KEY')  | quote }}
+          --insecure-skip-tls-verify=true
+          --type='json'
+          -p='[{"op": "replace", "path": "/spec/template/spec/domain/cpu/sockets", "value": {{ new_sockets }} }]'
+      register: kubectl_patch_result
+      # Check the output of kubectl to see if a change was made
+      changed_when: "'patched' in kubectl_patch_result.stdout"
+
+    # Optional: Display the result of the patch operation
+    - name: Show Kubectl Patch Result (if changed)
+      ansible.builtin.debug:
+        var: kubectl_patch_result.stdout # Show kubectl output if changed
+      when: kubectl_patch_result is defined and kubectl_patch_result.changed
